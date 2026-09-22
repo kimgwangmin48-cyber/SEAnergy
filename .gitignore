@@ -1,0 +1,13 @@
+# 데이터셋은 용량이 커서(약 2GB+) git 대신 로컬/Notion에 보관합니다.
+# 다운로드·전처리 스크립트는 preprocessing/ 에 있으니, 데이터는 그걸로 재생성하세요.
+datasets/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
