@@ -18,23 +18,23 @@
 |---|---|---|---|
 | [NASA PCoE](https://www.kaggle.com/datasets/ckskaggle/li-ion-battery-dataset-from-nasa-pcoe) | LCO | 실험실 가속열화 | 채택 |
 | [BatICM](https://github.com/BatICM/battery-charging-data-of-on-road-electric-vehicles) | NCM | 실차 20대, 29개월 실사용 데이터 | 채택 (메인) |
-| [SNL (batteryarchive.org)](http://batteryarchive.org) | NMC | 온도×방전심도×C-rate 통제 실험 | 검토 중 |
+| [SNL (batteryarchive.org)](http://batteryarchive.org) | NMC | 온도×방전심도×C-rate 통제 실험 | 채택 |
 
 원본·전처리 데이터는 용량 문제로(2GB+) 이 저장소에 포함하지 않습니다. `preprocessing/`의 스크립트로 각자 재생성해서 사용하세요.
 
 ## 실행 방법
 
 ```bash
-pip install pandas
+pip install pandas scikit-learn joblib
 
 # NASA PCoE / BatICM 전처리
 python preprocessing/prepare_training_data.py
 
-# SNL NMC 전처리
+# SNL NMC 전처리 (스케일링 포함)
 python preprocessing/prepare_snl_data.py
 ```
 
-각 스크립트는 원본 CSV(전처리 전 데이터)가 `datasets/<데이터셋명>/processed/` 아래 있다고 가정하고, 결측치·이상치를 제거한 학습용 CSV를 같은 경로에 생성합니다.
+각 스크립트는 원본 CSV(전처리 전 데이터)가 `datasets/<데이터셋명>/processed/` 아래 있다고 가정하고, 결측치·이상치를 제거한 학습용 CSV를 같은 경로에 생성합니다. `prepare_snl_data.py`는 추가로 주요 수치형 피처에 StandardScaler를 적용한 `_scaled` 컬럼과 재사용 가능한 스케일러(`snl_nmc_scaler.joblib`)도 함께 생성합니다.
 
 ## 저장소 구조
 

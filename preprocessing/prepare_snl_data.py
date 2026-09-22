@@ -5,16 +5,44 @@ Sandia National Labs (SNL) 18650 NMC 데이터 후처리.
 셀별 사이클 데이터(ah_c, ah_d, e_c, e_d, ah_eff, e_eff)에
 soh(ah_d / rated_capacity_ah)와 온도/DoD/C-rate 메타 컬럼을 추가해
 학습용 파일로 저장한다.
+
+스케일링(StandardScaler)까지 적용해서 `_scaled` 컬럼을 추가로 만든다.
+트리/앙상블 모델(XGBoost 등)은 스케일링이 필요 없지만, 다른 알고리즘을
+같이 시도하거나 피처 간 크기를 비교할 때 쓸 수 있게 원본 값과 스케일된
+값을 둘 다 남겨둔다. 여기서는 전체 데이터에 대해 스케일러를 학습시켰는데,
+실제 모델링 단계에서 train/test를 나누면 스케일러는 train 셋에만
+다시 fit하는 걸 권장한다 (여기 스케일러를 그대로 쓰면 test 정보가
+train에 살짝 새는 data leakage가 생길 수 있음).
 """
 
 import re
+import joblib
 import pandas as pd
 from pathlib import Path
+from sklearn.preprocessing import StandardScaler
 
 SRC = Path(r"C:\tmp\snl_capacity_per_cycle.csv")
 OUT_DIR = Path(r"E:\7-4. 글로벌공학설계프로젝트\프로젝트\datasets\SNL_NMC\processed")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 OUT = OUT_DIR / "snl_nmc_training.csv"
+SCALER_OUT = OUT_DIR / "snl_nmc_scaler.joblib"
+
+# 스케일링 대상: 값의 스케일이 서로 다른 수치형 피처만 (id·범주형·타깃(soh) 제외)
+SCALE_COLS = [
+    "cycle_index",
+    "ah_c",
+    "ah_d",
+    "e_c",
+    "e_d",
+    "ah_eff",
+    "e_eff",
+    "temperature_c",
+    "soc_min",
+    "soc_max",
+    "crate_charge",
+    "crate_discharge",
+    "bol_capacity_ah",
+]
 
 RATED_CAPACITY_AH = 3.0  # 참고용(공칭 스펙). 0-100% DoD 셀에만 대략 들어맞음.
 # 초반 몇 사이클은 formation/특성평가 구간이라 목표 DoD보다 용량이 크게 찍힌다
@@ -71,10 +99,18 @@ def main():
 
     df = df[(df["soh"] >= 0.5) & (df["soh"] <= 1.15)].copy()
 
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(df[SCALE_COLS])
+    for i, col in enumerate(SCALE_COLS):
+        df[f"{col}_scaled"] = scaled[:, i]
+    joblib.dump(scaler, SCALER_OUT)
+
     df.to_csv(OUT, index=False)
     print(f"rows: {before} -> {len(df)}")
     print(f"cells: {df['cell_id'].nunique()}")
+    print(f"scaled columns: {SCALE_COLS}")
     print(f"saved to {OUT}")
+    print(f"scaler saved to {SCALER_OUT}")
 
 
 if __name__ == "__main__":
