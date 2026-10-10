@@ -21,8 +21,10 @@ import pandas as pd
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 
-SRC = Path(r"C:\tmp\snl_capacity_per_cycle.csv")
-OUT_DIR = Path(r"E:\7-4. 글로벌공학설계프로젝트\프로젝트\datasets\SNL_NMC\processed")
+DATASETS = Path(__file__).resolve().parents[1] / "datasets"  # 저장소 루트/datasets
+# batteryarchive.org 차트에서 셀별로 추출한 원본 CSV (저장소에는 포함하지 않음)
+SRC = DATASETS / "SNL_NMC" / "raw" / "snl_capacity_per_cycle.csv"
+OUT_DIR = DATASETS / "SNL_NMC" / "processed"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 OUT = OUT_DIR / "snl_nmc_training.csv"
 SCALER_OUT = OUT_DIR / "snl_nmc_scaler.joblib"

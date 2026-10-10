@@ -10,7 +10,7 @@ BatICM: soh가 0.5 ~ 1.05 범위를 벗어나는 행(완충 안 된 짧은 세�
 import pandas as pd
 from pathlib import Path
 
-ROOT = Path(r"E:\7-4. 글로벌공학설계프로젝트\프로젝트\datasets")
+ROOT = Path(__file__).resolve().parents[1] / "datasets"  # 저장소 루트/datasets
 
 NASA_SRC = ROOT / "NASA_PCoE_Battery" / "processed" / "nasa_battery_cycle_level.csv"
 NASA_OUT = ROOT / "NASA_PCoE_Battery" / "processed" / "nasa_battery_training.csv"

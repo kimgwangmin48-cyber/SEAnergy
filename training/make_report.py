@@ -70,8 +70,14 @@ def main():
     L += ["## 5. BatICM 오차 분석 (처음 보는 차량 기준, 5분위별 MAE / 편향)", ""]
     for nm, rows in R["BatICM_error_by_quintile"].items():
         L.append(f"- {nm}: " + " · ".join(f"Q{r['quintile'] + 1} {r['MAE']:.4f}/{r['bias']:+.4f}" for r in rows))
-    imp = list(R["importance_gain"].items())[:10]
-    L += ["", "## 6. 피처 중요도 (gain, 상위 10)", ""] + [f"- `{k}`: {v:.3f}" for k, v in imp]
+    ids = {"voltage_available", "current_available", "soc_available", "rated_capacity_ah", "is_nasa", "is_baticm", "is_snl"}
+    allimp = list(R["importance_gain"].items())
+    top_ids = [k for k, _ in allimp if k in ids][:4]
+    imp = [(k, v) for k, v in allimp if k not in ids][:10]
+    L += ["", "## 6. 피처 중요도 (gain, 상위 10)", "",
+          "`voltage_available`, `soc_available`, `rated_capacity_ah`, `is_*` 같은 값은 \"어느 데이터셋인지\"를 알려주는 구분용 값이라 "
+          f"열화 요인이 아닙니다(전체 순위에서는 {', '.join('`%s`' % k for k in top_ids)} 등이 위에 옵니다). 이를 뺀 상위 10개입니다.", ""] + [
+        f"- `{k}`: {v:.3f}" for k, v in imp]
     p = R["best_params"]
     L += ["", "## 7. 최종 하이퍼파라미터", "", "```json", json.dumps(p, indent=2, ensure_ascii=False), "```", "",
           f"라운드 수(전체 데이터): 개발 {R['n_rounds_dev']} → 전체 학습 시 데이터 크기 비례 보정"]

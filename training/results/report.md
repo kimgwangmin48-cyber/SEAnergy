@@ -63,16 +63,18 @@ test 엔티티 수는 BatICM 3, SNL 2, NASA 5개뿐이라 값이 흔들립니다
 
 ## 6. 피처 중요도 (gain, 상위 10)
 
-- `voltage_available`: 970.498
-- `current_available`: 595.341
+`voltage_available`, `soc_available`, `rated_capacity_ah`, `is_*` 같은 값은 "어느 데이터셋인지"를 알려주는 구분용 값이라 열화 요인이 아닙니다(전체 순위에서는 `voltage_available`, `current_available`, `soc_available`, `rated_capacity_ah` 등이 위에 옵니다). 이를 뺀 상위 10개입니다.
+
 - `dVdSOC_at_60_to_90_r20`: 422.823
-- `soc_available`: 421.688
 - `v_at_70_r20`: 274.408
 - `cycle_index`: 241.502
-- `rated_capacity_ah`: 222.725
 - `charge_c_rate`: 213.311
 - `discharge_c_rate`: 178.458
 - `temperature_c`: 146.500
+- `current_mean_a`: 137.976
+- `time_elapsed_days`: 128.049
+- `cellv_max_end`: 122.961
+- `spread_max`: 122.226
 
 ## 7. 최종 하이퍼파라미터
 

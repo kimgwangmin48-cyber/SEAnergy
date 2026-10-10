@@ -25,7 +25,7 @@
 | [BatICM](https://github.com/BatICM/battery-charging-data-of-on-road-electric-vehicles) | NCM | 실차 20대(BAIC EU500), 29개월 충전 로그 (메인) |
 | [SNL](http://batteryarchive.org) | NMC | 온도·방전심도·C-rate 통제 실험, 시험조건 8가지 |
 
-데이터는 용량과 출처 라이선스 때문에 저장소에 넣지 않았습니다. BatICM을 쓰실 때는 원 논문(Applied Energy, 2023)을 인용해 주세요.
+원본 데이터는 용량 때문에 저장소에 넣지 않았고, 세 데이터를 한 표로 합친 학습용 통합 데이터(`모든 데이터 병합.xlsx`, 약 6MB, 71,080행)만 저장소 루트에 포함했습니다. BatICM을 쓰실 때는 원 논문(Applied Energy, 2023)을 인용해 주세요.
 
 ## SOH 예측 모델
 
@@ -70,17 +70,17 @@ out = predict_soh(df, dataset="BatICM", model=load_model())  # soh_pred, soh_lo9
 pip install -r training/requirements.txt
 
 python preprocessing/prepare_training_data.py   # NASA / BatICM 전처리
-python preprocessing/prepare_snl_data.py        # SNL 전처리
+python preprocessing/prepare_snl_data.py        # SNL 전처리 (입력: datasets/SNL_NMC/raw/snl_capacity_per_cycle.csv)
 
-# 저장소 루트에 '모든 데이터 병합.xlsx'(팀 통합본)가 있어야 합니다
-python training/build_baticm_features.py        # BatICM 원본 로그에서 세션 피처 생성
+# 학습 입력은 저장소 루트의 '모든 데이터 병합.xlsx'입니다 (저장소에 포함)
+python training/build_baticm_features.py        # BatICM 원본 로그(약 1.1GB, datasets/BatICM/raw_csv)에서 세션 피처 생성
 python training/train_final.py --trials 25 --inner-trials 10   # 학습·검증 (약 45분)
 python training/compare_rf.py                   # (선택) RandomForest 비교
 python training/make_report.py                  # training/results/report.md 생성
 python training/tests/test_core.py              # 빠른 테스트
 ```
 
-시드(`42`)와 XGBoost 스레드 수(4)를 고정해서 다른 컴퓨터에서도 같은 결과가 나옵니다. 스레드 수가 달라지면 같은 설정에서도 조기종료 라운드가 크게 달라지는 것을 확인했습니다.
+전처리에 쓰는 원본 CSV는 저장소에 없고 `datasets/` 아래에 두어야 합니다. SNL은 batteryarchive.org에 다운로드 버튼이 없어서 차트 데이터를 셀별로 직접 추출한 파일을 씁니다. 시드(`42`)와 XGBoost 스레드 수(4)를 고정해서 다른 컴퓨터에서도 같은 결과가 나옵니다. 스레드 수가 달라지면 같은 설정에서도 조기종료 라운드가 크게 달라지는 것을 확인했습니다.
 
 ## 저장소 구조
 
@@ -89,6 +89,7 @@ preprocessing/   데이터셋별 전처리
 training/        피처 생성, 학습·검증, 추론(predict_soh.py), 테스트
   results/       최종 모델(5개), 설정, 지표, 리포트, 그림
 datasets/        (git 제외) 원본·전처리 데이터
+모든 데이터 병합.xlsx   학습용 통합 데이터 (NASA + BatICM + SNL)
 ```
 
 ## 팀
