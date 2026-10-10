@@ -1,39 +1,38 @@
-﻿== data: 71063 rows | dev 60822 (65 ent) | test 10241 (11 ent) | +40 BatICM features
+﻿== data: 71063 rows | dev 60822 (65 ent) | test 10241 (11 ent) | +40 BatICM features | threads 4 x jobs 5
    BatICM label noise vs local trend: MAE 0.0125 RMSE 0.0188
 
 == [1] design selection (dev, grouped CV x3, fixed v1 hyper-params)
-   B_team16 (v1)        rel 0.3929 | BatICM RMSE 0.0207 MAE 0.0146 | NASA 0.0580 | SNL 0.0273
-   C_full               rel 0.3687 | BatICM RMSE 0.0177 MAE 0.0118 | NASA 0.0586 | SNL 0.0263
-   C_full+monotone      rel 0.3644 | BatICM RMSE 0.0181 MAE 0.0121 | NASA 0.0594 | SNL 0.0247
-   +MAE loss            rel 0.3486 | BatICM RMSE 0.0170 MAE 0.0112 | NASA 0.0595 | SNL 0.0196
-   +BatICM weight x2    rel 0.3612 | BatICM RMSE 0.0164 MAE 0.0105 | NASA 0.0621 | SNL 0.0228
-   +BatICM weight x3    rel 0.3596 | BatICM RMSE 0.0162 MAE 0.0104 | NASA 0.0604 | SNL 0.0252
-   -> chosen: +MAE loss  (rel 0.3486, best 0.3486; 1% 이내면 단순한 쪽)
+   B_team16 (v1)        rel 0.3940 | BatICM RMSE 0.0206 MAE 0.0145 | NASA 0.0586 | SNL 0.0277
+   C_full               rel 0.3679 | BatICM RMSE 0.0176 MAE 0.0117 | NASA 0.0583 | SNL 0.0263
+   C_full+monotone      rel 0.3618 | BatICM RMSE 0.0179 MAE 0.0119 | NASA 0.0582 | SNL 0.0248
+   +MAE loss            rel 0.3489 | BatICM RMSE 0.0171 MAE 0.0112 | NASA 0.0598 | SNL 0.0202
+   +BatICM weight x2    rel 0.3538 | BatICM RMSE 0.0164 MAE 0.0106 | NASA 0.0601 | SNL 0.0240
+   +BatICM weight x3    rel 0.3584 | BatICM RMSE 0.0162 MAE 0.0104 | NASA 0.0606 | SNL 0.0256
+   -> chosen: +MAE loss  (rel 0.3489, best 0.3489; 1% 이내면 단순한 쪽)
 
-== [2] tuning on dev (12 random trials + 3 start points, grouped CV x3)
-   dev trial 00 rel-score 0.3486  <-- best
-   dev trial 09 rel-score 0.3472  <-- best
-   dev trial 12 rel-score 0.3471  <-- best
-   rel-score design 0.3486 -> tuned 0.3471 | rounds 127
+== [2] tuning on dev (25 random trials + 3 start points, grouped CV x3)
+   dev trial 00 rel-score 0.3489  <-- best
+   dev trial 09 rel-score 0.3428  <-- best
+   rel-score design 0.3489 -> tuned 0.3428 | rounds 339
 
 == [3] test (11 untouched entities, evaluated once)
-   NASA    FINAL MAE 0.0721 RMSE 0.1077 R2 0.502 | v1 RMSE 0.1095 | RF 0.1099 | median 0.1571 | linear 0.1782
-   BatICM  FINAL MAE 0.0118 RMSE 0.0193 R2 0.744 | v1 RMSE 0.0207 | RF 0.0168 | median 0.0388 | linear 0.0228
-   SNL     FINAL MAE 0.0058 RMSE 0.0069 R2 0.973 | v1 RMSE 0.0075 | RF 0.0078 | median 0.0473 | linear 0.0321
-   shuffled-target check: 0.0944 vs baseline 0.0919 -> PASS
+   NASA    FINAL MAE 0.0821 RMSE 0.1185 R2 0.397 | v1 RMSE 0.1099 | RF 0.1099 | median 0.1571 | linear 0.1782
+   BatICM  FINAL MAE 0.0113 RMSE 0.0172 R2 0.796 | v1 RMSE 0.0207 | RF 0.0168 | median 0.0388 | linear 0.0228
+   SNL     FINAL MAE 0.0053 RMSE 0.0064 R2 0.977 | v1 RMSE 0.0074 | RF 0.0078 | median 0.0473 | linear 0.0321
+   shuffled-target check: 0.0952 vs baseline 0.0919 -> PASS
 
-== [4] nested CV on all data (outer 5 / inner 3 x 8 candidates, bag 5)
-   outer fold 0: inner rel 0.3942 | rounds 112 | depth 12 lr 0.050
-   outer fold 1: inner rel 0.5801 | rounds 128 | depth 5 lr 0.140
-   outer fold 2: inner rel 0.3984 | rounds 284 | depth 5 lr 0.140
-   outer fold 3: inner rel 0.5228 | rounds 400 | depth 11 lr 0.043
-   outer fold 4: inner rel 0.3876 | rounds 131 | depth 12 lr 0.050
-   NASA    MAE 0.0469 [0.0367,0.0605] | RMSE 0.0688 [0.0528,0.0867] | R2 0.793 [0.669,0.871] (median-baseline RMSE 0.1516)
-   BatICM  MAE 0.0104 [0.0096,0.0113] | RMSE 0.0163 [0.0147,0.0179] | R2 0.843 [0.815,0.867] (median-baseline RMSE 0.0411)
-   SNL     MAE 0.0138 [0.0101,0.0177] | RMSE 0.0198 [0.0140,0.0267] | R2 0.909 [0.823,0.946] (median-baseline RMSE 0.0657)
-   BatICM per-vehicle MAE: min 0.0087 / median 0.0098 / max 0.0161 (BatICM_9)
-   90% interval: NASA +-0.0942 (coverage 0.86), BatICM +-0.0221 (coverage 0.90), SNL +-0.0234 (coverage 0.90)
+== [4] nested CV on all data (outer 5 / inner 3 x 13 candidates, bag 5)
+   outer fold 0: inner rel 0.3957 | rounds 844 | depth 4 lr 0.028
+   outer fold 1: inner rel 0.5753 | rounds 470 | depth 10 lr 0.023
+   outer fold 2: inner rel 0.3982 | rounds 219 | depth 7 lr 0.037
+   outer fold 3: inner rel 0.5136 | rounds 433 | depth 11 lr 0.043
+   outer fold 4: inner rel 0.3959 | rounds 124 | depth 12 lr 0.050
+   NASA    MAE 0.0442 [0.0344,0.0573] | RMSE 0.0652 [0.0498,0.0833] | R2 0.814 [0.709,0.884] (median-baseline RMSE 0.1516)
+   BatICM  MAE 0.0105 [0.0097,0.0114] | RMSE 0.0164 [0.0148,0.0181] | R2 0.841 [0.808,0.869] (median-baseline RMSE 0.0411)
+   SNL     MAE 0.0127 [0.0095,0.0165] | RMSE 0.0194 [0.0135,0.0268] | R2 0.913 [0.842,0.950] (median-baseline RMSE 0.0657)
+   BatICM per-vehicle MAE: min 0.0084 / median 0.0099 / max 0.0157 (BatICM_9)
+   90% interval: NASA +-0.0872 (coverage 0.89), BatICM +-0.0222 (coverage 0.90), SNL +-0.0227 (coverage 0.90)
 
 == [5] final model on all data (5-seed bag)
 
-== done in 71.7 min -> training/results
+== done in 43.3 min -> training/results

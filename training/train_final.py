@@ -11,15 +11,23 @@ SEAnergy SOH XGBoost -- 최종 파이프라인 (열화 피처 + 그룹 검증 + 
   5. 최종 모델: 전체 데이터로 5개 시드 재학습(평균) -> 모델 파일 + 행별 SOH 예측(+90% 구간)
 
 검증 원칙: 같은 배터리/차량/SNL 시험조건은 항상 같은 fold. 설계/튜닝은 test를 보지 않는다. 보고 수치는 튜닝에 쓰이지 않은 데이터에서만.
-실행:  python build_baticm_features.py  ->  python train_final.py [--trials 40 --inner-trials 20] [--quick]
+
+속도/재현성
+  - XGBoost 스레드 수는 4로 고정(soh_common.NTHREAD) -> 컴퓨터가 달라도 같은 결과.
+  - fold(와 반복)를 스레드 풀로 동시에 학습하고, fold별 DMatrix는 한 번만 만들어 모든 후보가 재사용한다.
+    병렬 정도(SOH_N_JOBS)는 결과에 영향이 없다(각 학습이 독립이고 스레드 수가 고정).
+
+실행:  python build_baticm_features.py  ->  python train_final.py [--trials 12 --inner-trials 5] [--quick]
 """
 import argparse
 import hashlib
 import json
+import os
 import platform
 import sys
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import matplotlib
@@ -33,14 +41,15 @@ import xgboost as xgb
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import StratifiedGroupKFold
 
-import train_soh_xgb as T
+import soh_common as common
+from soh_common import SEED, TARGET
 
 warnings.filterwarnings("ignore")
-SEED, TARGET = T.SEED, T.TARGET
 SRC = ["NASA", "BatICM", "SNL"]
-FE_PATH = T.OUT / "features_baticm.pkl"
-RES = T.ROOT / "training" / "results"
+FE_PATH = common.OUT / "features_baticm.pkl"
+RES = common.ROOT / "training" / "results"
 BAG = 5  # 최종/평가 모델은 시드 5개 평균 (subsample/colsample 무작위성에 의한 분산 감소)
+N_JOBS = int(os.environ.get("SOH_N_JOBS", max(1, min(5, (os.cpu_count() or 4) // common.NTHREAD))))
 
 # v1(팀 통합본 16피처, MSE 손실, source_balanced) 최종 설정 -- 비교 기준선으로 재현
 V1_PARAMS = dict(learning_rate=0.03742472165665569, max_depth=7, min_child_weight=47.735964446695256,
@@ -53,7 +62,7 @@ START_POINTS = [V1_PARAMS,
                      colsample_bytree=0.8, reg_alpha=0.0, gamma=0.0),
                 dict(learning_rate=0.05, max_depth=12, min_child_weight=5, subsample=0.7, colsample_bytree=1.0,
                      colsample_bynode=0.5, reg_lambda=1.0, reg_alpha=0.0, gamma=0.0)]
-BASE_NOISE_WINDOW = 101
+NOISE_WINDOW = 101
 # 정답(용량/SOH)을 복원하거나 BMS가 이미 계산해 둔 값 -> 입력 금지 (정격용량 rated_capacity_ah 는 소스별 상수라 허용)
 LEAKY = {"capacity_ah", "capacity_ah_unified", "available_capacity", "available_energy", "duration_s", "n_samples"}
 
@@ -62,9 +71,9 @@ def log(m=""):
     print(m, flush=True)
 
 
-# ------------------------------------------------------------------ 데이터
+# ------------------------------------------------------------------ 데이터 / 모델 입출력
 def load_all():
-    raw = T.load_data()
+    raw = common.load_data()
     fe = pd.read_pickle(FE_PATH)
     fe.columns = [c.replace("@", "_at_").replace("-", "_to_") for c in fe.columns]
     raw = raw.merge(fe, on="row_id", how="left")
@@ -75,7 +84,7 @@ def load_all():
 
 
 def objective_params(obj):
-    p = dict(T.BASE_PARAMS)
+    p = dict(common.BASE_PARAMS)
     if obj == "abs":
         p.update(objective="reg:absoluteerror", eval_metric="mae")
     return p
@@ -91,35 +100,59 @@ def dm(df, feats, w=None):
                        feature_names=list(feats), missing=np.nan)
 
 
-def pred(bst, df, feats, n=None):
-    d = xgb.DMatrix(df[feats].to_numpy(float), feature_names=list(feats), missing=np.nan)
-    return bst.predict(d) if n is None else bst.predict(d, iteration_range=(0, n))
+def pred(bst, df, feats):
+    return bst.predict(xgb.DMatrix(df[feats].to_numpy(float), feature_names=list(feats), missing=np.nan))
 
 
-def fit_bag(params, df, feats, w, rounds, n_bag=BAG):
-    return [xgb.train(dict(params, seed=SEED + k), dm(df, feats, w), num_boost_round=rounds, verbose_eval=False)
-            for k in range(n_bag)]
+def pmap(fn, items, workers=None):
+    """스레드 풀 map (XGBoost 학습은 GIL을 놓으므로 스레드로 충분하고 데이터 복사가 없다)"""
+    with ThreadPoolExecutor(workers or N_JOBS) as ex:
+        return list(ex.map(fn, items))
 
 
-def pred_bag(bag, df, feats):
-    return np.mean([pred(b, df, feats) for b in bag], axis=0)
+# ------------------------------------------------------------------ 병렬 CV (DMatrix 캐시)
+class CVData:
+    """fold별 (검증 인덱스, 학습 DMatrix(가중치), 검증 DMatrix(엔티티 균등 가중))를 한 번만 만들어 후보마다 재사용"""
+
+    def __init__(self, df, folds, mode, feats):
+        def build(f):
+            tr, va = f
+            a, b = df.iloc[tr], df.iloc[va]
+            return va, dm(a, feats, common.make_weights(a, mode)), dm(b, feats, common.make_weights(b, "entity"))
+        self.n, self.folds = len(df), pmap(build, folds)
 
 
-def cv_fit(df, folds, params, mode, feats, mono=False):
+def _fit_fold(params, dtr, dva):
+    bst = xgb.train(params, dtr, num_boost_round=4000, evals=[(dva, "valid")],
+                    early_stopping_rounds=100, verbose_eval=False)
+    n = int(bst.best_iteration) + 1
+    return bst.predict(dva, iteration_range=(0, n)), n
+
+
+def cv_fit(datas, params, feats, mono=False):
+    """CVData 목록(반복)의 모든 fold를 동시에 학습. 조기종료는 fold 검증셋에서. -> (반복별 OOF 목록, 라운드 목록)"""
     p = dict(params)
     if mono:
         p["monotone_constraints"] = mono_str(feats)
-    oof, iters = np.full(len(df), np.nan), []
-    for tr, va in folds:
-        a, b = df.iloc[tr], df.iloc[va]
-        bst = xgb.train(p, dm(a, feats, T.make_weights(a, mode)), num_boost_round=4000,
-                        evals=[(dm(b, feats, T.make_weights(b, "entity")), "valid")],
-                        early_stopping_rounds=100, verbose_eval=False)
-        n = int(bst.best_iteration) + 1
-        oof[va] = pred(bst, b, feats, n)
+    tasks = [(r, va, dtr, dva) for r, d in enumerate(datas) for va, dtr, dva in d.folds]
+    results = pmap(lambda t: _fit_fold(p, t[2], t[3]), tasks)
+    oofs, iters = [np.full(d.n, np.nan) for d in datas], []
+    for (r, va, _, _), (pr, n) in zip(tasks, results):
+        oofs[r][va] = pr
         iters.append(n)
-    assert np.isfinite(oof).all(), "OOF 결측"
-    return oof, iters
+    assert all(np.isfinite(o).all() for o in oofs), "OOF 결측"
+    return oofs, iters
+
+
+def fit_bag(params, df, feats, w, rounds, n_bag=BAG):
+    def one(k):
+        return xgb.train(dict(params, seed=SEED + k), dm(df, feats, w), num_boost_round=rounds, verbose_eval=False)
+    return pmap(one, range(n_bag), min(N_JOBS, n_bag))
+
+
+def pred_bag(bag, df, feats):
+    d = xgb.DMatrix(df[feats].to_numpy(float), feature_names=list(feats), missing=np.nan)
+    return np.mean([b.predict(d) for b in bag], axis=0)
 
 
 def make_folds(df, n_splits, seed):
@@ -135,11 +168,12 @@ def baseline_oofs(df, fold_sets):
     for fs in fold_sets:
         o = np.zeros(len(df))
         for tr, va in fs:
-            o[va] = T.SourceMedian().fit(df.iloc[tr]).predict(df.iloc[va])
+            o[va] = common.SourceMedian().fit(df.iloc[tr]).predict(df.iloc[va])
         out.append(o)
     return out
 
 
+# ------------------------------------------------------------------ 지표
 def row_metrics(y, p):
     e = y - p
     sst = ((y - y.mean()) ** 2).sum()
@@ -161,6 +195,11 @@ def cluster_ci(d, p, B=1000):
     return {k: [float(np.nanpercentile(v, 2.5)), float(np.nanpercentile(v, 97.5))] for k, v in res.items()}
 
 
+def per_source_metrics(df, p):
+    return {s: row_metrics(df[TARGET].to_numpy()[(df.source == s).to_numpy()], p[(df.source == s).to_numpy()]) for s in SRC}
+
+
+# ------------------------------------------------------------------ 랜덤서치
 def sample_params(rng):
     """랜덤서치 공간 (분산을 줄이는 깊은 트리 + 서브샘플링 영역까지 포함)"""
     lu = lambda lo, hi: float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
@@ -170,18 +209,16 @@ def sample_params(rng):
                 gamma=float(rng.choice([0.0, 0.01, 0.1])))
 
 
-def search(df, fold_sets, bmed, feats, mode, n_trials, base, mono, tag=""):
+def search(df, datas, bmed, feats, n_trials, base, mono, tag=""):
+    """시작점 + 랜덤 후보를 그룹 CV(rel-score)로 비교. 반환: (최고 후보, 시도 기록)"""
     rng = np.random.RandomState(SEED)
     cand = [dict(base, **sp) for sp in START_POINTS]
     for _ in range(n_trials):
         p = dict(base); p.update(sample_params(rng)); cand.append(p)
     best, rows = None, []
     for t, p in enumerate(cand):
-        oofs, its = [], []
-        for fs in fold_sets:
-            o, it = cv_fit(df, fs, p, mode, feats, mono)
-            oofs.append(o); its += it
-        sc = T.rel_score(df, oofs, bmed)
+        oofs, its = cv_fit(datas, p, feats, mono)
+        sc = common.rel_score(df, oofs, bmed)
         rows.append({"trial": t, "rel_score": sc, "median_iters": int(np.median(its))})
         if best is None or sc < best["score"]:
             best = {"score": sc, "params": p, "iters": its}
@@ -190,80 +227,44 @@ def search(df, fold_sets, bmed, feats, mode, n_trials, base, mono, tag=""):
     return best, pd.DataFrame(rows)
 
 
-# ------------------------------------------------------------------ main
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--trials", type=int, default=40)
-    ap.add_argument("--inner-trials", type=int, default=20)
-    ap.add_argument("--quick", action="store_true")
-    a = ap.parse_args()
-    if a.quick:
-        a.trials, a.inner_trials = 2, 1
-    sys.stdout.reconfigure(encoding="utf-8")
-    RES.mkdir(parents=True, exist_ok=True)
-    t0 = time.time()
-    R = {"env": {"xgboost": xgb.__version__, "sklearn": sklearn.__version__, "pandas": pd.__version__,
-                 "numpy": np.__version__, "python": sys.version.split()[0], "platform": platform.platform(),
-                 "seed": SEED, "bag": BAG, "data_sha256": hashlib.sha256(T.DATA_XLSX.read_bytes()).hexdigest()[:16]}}
-
-    # ---------- 0. 데이터
-    raw, fe_cols = load_all()
-    df, clean_rep = T.clean(raw)
-    df = df.reset_index(drop=True)
-    dev = df[df.split.isin(["train", "validation"])].reset_index(drop=True)
-    test = df[df.split == "test"].reset_index(drop=True)
-    R["sanity"] = T.sanity_checks(df, dev, test)
-    team16 = list(T.FEATURES)
-    full = team16 + fe_cols
-    for f in full:  # 누수 위험 컬럼 차단
-        assert f not in T.FORBIDDEN_IN_X and f not in LEAKY and not f.startswith("available_"), f
-    R["cleaning"] = clean_rep
-    R["features"] = {"team16": team16, "baticm_session_features": fe_cols}
-    log(f"== data: {len(df)} rows | dev {len(dev)} ({dev.entity_id.nunique()} ent) | test {len(test)} ({test.entity_id.nunique()} ent) | +{len(fe_cols)} BatICM features")
-
-    # BatICM 정답 잡음 바닥 (정답이 차량 추세 주위에서 흔들리는 정도 -- 이보다 잘 맞추는 건 정보(피처)가 있어야 가능)
-    bb = df[df.source == "BatICM"].sort_values(["entity_id", "cycle_index"])
-    tr_ = bb.groupby("entity_id")[TARGET].transform(lambda s: s.rolling(BASE_NOISE_WINDOW, center=True, min_periods=BASE_NOISE_WINDOW // 2).median())
-    e_ = (bb[TARGET] - tr_).dropna()
-    R["BatICM_label_noise_floor_vs_local_trend"] = {"MAE": float(e_.abs().mean()), "RMSE": float(np.sqrt((e_ ** 2).mean()))}
-    log(f"   BatICM label noise vs local trend: MAE {e_.abs().mean():.4f} RMSE {np.sqrt((e_ ** 2).mean()):.4f}")
-
-    n_rep = 1 if a.quick else 3
-    dfs = [make_folds(dev, 5, SEED + r) for r in range(n_rep)]
-    bmed = baseline_oofs(dev, dfs)
-
-    # ---------- 1. 설계 선택 (dev, 그룹 CV, 고정 파라미터=v1 설정)
-    log("\n== [1] design selection (dev, grouped CV x%d, fixed v1 hyper-params)" % n_rep)
+# ------------------------------------------------------------------ 단계
+def stage_design(dev, dfs, bmed, team16, full, R):
+    """[1] 설계 선택: 단순 -> 복잡 순서로 비교하고, 최소 rel-score의 1% 이내면 더 단순한 설정을 고른다"""
+    log("\n== [1] design selection (dev, grouped CV x%d, fixed v1 hyper-params)" % len(dfs))
     sq, ab = objective_params("sq"), objective_params("abs")
-    cfgs = [  # (이름, 피처, 손실, 가중치, 단조)  -- 단순 -> 복잡 순서
-        ("B_team16 (v1)", team16, sq, "source_balanced", False),
-        ("C_full", full, sq, "source_balanced", False),
-        ("C_full+monotone", full, sq, "source_balanced", True),
-        ("+MAE loss", full, ab, "source_balanced", True),
-        ("+BatICM weight x2", full, ab, "sb:BatICM=2", True),
-        ("+BatICM weight x3", full, ab, "sb:BatICM=3", True)]
+    cfgs = [("B_team16 (v1)", team16, sq, "source_balanced", False),
+            ("C_full", full, sq, "source_balanced", False),
+            ("C_full+monotone", full, sq, "source_balanced", True),
+            ("+MAE loss", full, ab, "source_balanced", True),
+            ("+BatICM weight x2", full, ab, "sb:BatICM=2", True),
+            ("+BatICM weight x3", full, ab, "sb:BatICM=3", True)]
+    y = dev[TARGET].to_numpy()
     sel = {}
     for name, feats, base, mode, mono in cfgs:
-        p = dict(base, **V1_PARAMS)
-        oofs = [cv_fit(dev, fs, p, mode, feats, mono)[0] for fs in dfs]
-        ps = T.evaluate(dev, oofs[0])["per_source"]
-        sel[name] = {"rel": T.rel_score(dev, oofs, bmed),
-                     **{s: ps[s]["entity_macro_rmse"] for s in SRC},
-                     **{s + "_MAE": float(np.abs(dev[TARGET].to_numpy()[(dev.source == s).to_numpy()] - oofs[0][(dev.source == s).to_numpy()]).mean()) for s in SRC}}
-        log(f"   {name:20s} rel {sel[name]['rel']:.4f} | BatICM RMSE {sel[name]['BatICM']:.4f} MAE {sel[name]['BatICM_MAE']:.4f}"
-            f" | NASA {sel[name]['NASA']:.4f} | SNL {sel[name]['SNL']:.4f}")
+        datas = [CVData(dev, fs, mode, feats) for fs in dfs]
+        oofs, _ = cv_fit(datas, dict(base, **V1_PARAMS), feats, mono)
+        del datas
+        ps = common.evaluate(dev, oofs[0])["per_source"]
+        sel[name] = {"rel": common.rel_score(dev, oofs, bmed), **{s: ps[s]["entity_macro_rmse"] for s in SRC},
+                     **{s + "_MAE": float(np.abs(y - oofs[0])[(dev.source == s).to_numpy()].mean()) for s in SRC}}
+        v = sel[name]
+        log(f"   {name:20s} rel {v['rel']:.4f} | BatICM RMSE {v['BatICM']:.4f} MAE {v['BatICM_MAE']:.4f}"
+            f" | NASA {v['NASA']:.4f} | SNL {v['SNL']:.4f}")
     R["design_selection"] = sel
-    names = [c[0] for c in cfgs]
-    best_rel = min(sel[n]["rel"] for n in names)
-    chosen = next(n for n in names if sel[n]["rel"] <= best_rel * 1.01)
-    name, feats, base, mode, mono = next(c for c in cfgs if c[0] == chosen)
-    R["chosen_design"] = {"name": chosen, "objective": base["objective"], "weight_mode": mode, "monotone": mono,
-                          "n_features": len(feats)}
-    log(f"   -> chosen: {chosen}  (rel {sel[chosen]['rel']:.4f}, best {best_rel:.4f}; 1% 이내면 단순한 쪽)")
+    best_rel = min(v["rel"] for v in sel.values())
+    chosen = next(c for c in cfgs if sel[c[0]]["rel"] <= best_rel * 1.01)
+    R["chosen_design"] = {"name": chosen[0], "objective": chosen[2]["objective"], "weight_mode": chosen[3],
+                          "monotone": chosen[4], "n_features": len(chosen[1])}
+    log(f"   -> chosen: {chosen[0]}  (rel {sel[chosen[0]]['rel']:.4f}, best {best_rel:.4f}; 1% 이내면 단순한 쪽)")
+    return chosen
 
-    # ---------- 2. 튜닝 (dev)
-    log(f"\n== [2] tuning on dev ({a.trials} random trials + {len(START_POINTS)} start points, grouped CV x{n_rep})")
-    best, trials = search(dev, dfs, bmed, feats, mode, a.trials, base, mono, tag="dev")
+
+def stage_tune(dev, dfs, bmed, design, n_trials, R):
+    """[2] 튜닝(dev): 랜덤서치 + 그룹 CV. 반환: (최종 파라미터, 개발 데이터 라운드 수)"""
+    name, feats, base, mode, mono = design
+    log(f"\n== [2] tuning on dev ({n_trials} random trials + {len(START_POINTS)} start points, grouped CV x{len(dfs)})")
+    datas = [CVData(dev, fs, mode, feats) for fs in dfs]
+    best, trials = search(dev, datas, bmed, feats, n_trials, base, mono, tag="dev")
     trials.to_csv(RES / "search_trials.csv", index=False)
     params = dict(best["params"])
     if mono:
@@ -271,19 +272,23 @@ def main():
     n_dev = int(np.ceil(np.median(best["iters"]) * 1.1))
     R["best_params"] = {k: v for k, v in params.items() if k not in ("seed", "nthread")}
     R["n_rounds_dev"] = n_dev
-    R["tuning"] = {"design_rel": sel[chosen]["rel"], "tuned_rel": float(best["score"]), "n_trials": a.trials}
-    log(f"   rel-score design {sel[chosen]['rel']:.4f} -> tuned {best['score']:.4f} | rounds {n_dev}")
+    R["tuning"] = {"design_rel": R["design_selection"][name]["rel"], "tuned_rel": float(best["score"]), "n_trials": n_trials}
+    log(f"   rel-score design {R['design_selection'][name]['rel']:.4f} -> tuned {best['score']:.4f} | rounds {n_dev}")
+    return params, n_dev
 
-    # ---------- 3. test 1회 평가
+
+def stage_test(dev, test, design, params, n_dev, team16, R):
+    """[3] test 1회 평가(+ 비교 모델, 시드 변동, 정답 셔플 검사)"""
+    name, feats, base, mode, mono = design
     log("\n== [3] test (11 untouched entities, evaluated once)")
-    wdev = T.make_weights(dev, mode)
+    wdev = common.make_weights(dev, mode)
     bag = fit_bag(params, dev, feats, wdev, n_dev)
     p_test = pred_bag(bag, test, feats)
-    v1 = xgb.train(dict(sq, **V1_PARAMS, seed=SEED), dm(dev, team16, T.make_weights(dev, "source_balanced")),
+    v1 = xgb.train(dict(objective_params("sq"), **V1_PARAMS, seed=SEED), dm(dev, team16, common.make_weights(dev, "source_balanced")),
                    num_boost_round=V1_ROUNDS, verbose_eval=False)
     p_v1 = pred(v1, test, team16)
-    base_med, base_lin = T.SourceMedian().fit(dev).predict(test), T.SourceLinear().fit(dev).predict(test)
-    rf = RandomForestRegressor(n_estimators=300, min_samples_leaf=5, max_features=0.7, n_jobs=T.NTHREAD, random_state=SEED)
+    base_med, base_lin = common.SourceMedian().fit(dev).predict(test), common.SourceLinear().fit(dev).predict(test)
+    rf = RandomForestRegressor(n_estimators=300, min_samples_leaf=5, max_features=0.7, n_jobs=-1, random_state=SEED)
     rf.fit(dev[feats].fillna(-999), dev[TARGET], sample_weight=wdev)
     p_rf = rf.predict(test[feats].fillna(-999))
     tr = {}
@@ -298,45 +303,46 @@ def main():
         log(f"   {s:7s} FINAL MAE {v['final']['MAE']:.4f} RMSE {v['final']['RMSE']:.4f} R2 {v['final']['R2']:.3f} | v1 RMSE "
             f"{v['v1_team16']['RMSE']:.4f} | RF {v['random_forest']['RMSE']:.4f} | median {v['median_baseline']['RMSE']:.4f} | linear {v['linear_trend_baseline']['RMSE']:.4f}")
     R["test"] = tr
-    sd = []
-    for s_ in range(SEED, SEED + 5):  # 단일 모델 시드 변동 (참고)
-        pt = pred(xgb.train(dict(params, seed=s_), dm(dev, feats, wdev), num_boost_round=n_dev, verbose_eval=False), test, feats)
-        sd.append({s: row_metrics(test[TARGET].to_numpy()[(test.source == s).to_numpy()], pt[(test.source == s).to_numpy()])["RMSE"] for s in SRC})
-    sdf = pd.DataFrame(sd)
-    R["single_model_seed_std_test_RMSE"] = {s: [float(sdf[s].mean()), float(sdf[s].std())] for s in SRC}
+    # 단일 모델 시드 변동: 5-시드 모델의 각 멤버가 곧 시드별 단일 모델이다 (재학습 불필요)
+    sd = pd.DataFrame([{s: m["RMSE"] for s, m in per_source_metrics(test, pred(b, test, feats)).items()} for b in bag])
+    R["single_model_seed_std_test_RMSE"] = {s: [float(sd[s].mean()), float(sd[s].std())] for s in SRC}
     shuf = dev.copy()
     shuf[TARGET] = shuf.groupby("source")[TARGET].transform(lambda s: np.random.RandomState(SEED).permutation(s.to_numpy()))
-    bs = xgb.train(params, dm(shuf, feats, T.make_weights(shuf, mode)), num_boost_round=n_dev, verbose_eval=False)
-    sh, bm_ = T.evaluate(test, pred(bs, test, feats))["source_macro_rmse"], T.evaluate(test, base_med)["source_macro_rmse"]
+    bs = xgb.train(params, dm(shuf, feats, common.make_weights(shuf, mode)), num_boost_round=n_dev, verbose_eval=False)
+    sh, bm_ = common.evaluate(test, pred(bs, test, feats))["source_macro_rmse"], common.evaluate(test, base_med)["source_macro_rmse"]
     R["shuffle_check"] = {"shuffled_model": float(sh), "median_baseline": float(bm_), "passed": bool(sh >= 0.98 * bm_)}
     log(f"   shuffled-target check: {sh:.4f} vs baseline {bm_:.4f} -> {'PASS' if sh >= 0.98 * bm_ else 'FAIL'}")
 
-    # ---------- 4. 중첩 CV (전체 데이터)
-    log(f"\n== [4] nested CV on all data (outer 5 / inner 3 x {a.inner_trials + len(START_POINTS)} candidates, bag {BAG})")
-    outer = make_folds(df, 5, SEED + 77)
-    oof, fold_id, folds_info = np.full(len(df), np.nan), np.full(len(df), -1), []
-    for k, (tr_i, te_i) in enumerate(outer):
+
+def stage_nested(df, design, n_inner, R):
+    """[4] 중첩 CV(전체 데이터). 반환: 행별 OOF 예측, 90% 구간 반폭(데이터셋별)"""
+    name, feats, base, mode, mono = design
+    log(f"\n== [4] nested CV on all data (outer 5 / inner 3 x {n_inner + len(START_POINTS)} candidates, bag {BAG})")
+    oof, fold_id, info = np.full(len(df), np.nan), np.full(len(df), -1), []
+    for k, (tr_i, te_i) in enumerate(make_folds(df, 5, SEED + 77)):
         trd = df.iloc[tr_i].reset_index(drop=True)
         ifs = [make_folds(trd, 3, SEED + 100 + k)]
-        bk, _ = search(trd, ifs, baseline_oofs(trd, ifs), feats, mode, a.inner_trials, base, mono)
+        datas = [CVData(trd, ifs[0], mode, feats)]
+        bk, _ = search(trd, datas, baseline_oofs(trd, ifs), feats, n_inner, base, mono)
         pk = dict(bk["params"])
         if mono:
             pk["monotone_constraints"] = mono_str(feats)
         nk = int(np.ceil(np.median(bk["iters"]) * 1.1))
-        oof[te_i] = pred_bag(fit_bag(pk, trd, feats, T.make_weights(trd, mode), nk), df.iloc[te_i], feats)
+        oof[te_i] = pred_bag(fit_bag(pk, trd, feats, common.make_weights(trd, mode), nk), df.iloc[te_i], feats)
         fold_id[te_i] = k
-        folds_info.append({"fold": k, "rounds": nk, "inner_rel": bk["score"], "max_depth": pk["max_depth"],
-                           "learning_rate": round(pk["learning_rate"], 4)})
+        info.append({"fold": k, "rounds": nk, "inner_rel": bk["score"], "max_depth": pk["max_depth"],
+                     "learning_rate": round(pk["learning_rate"], 4)})
         log(f"   outer fold {k}: inner rel {bk['score']:.4f} | rounds {nk} | depth {pk['max_depth']} lr {pk['learning_rate']:.3f}")
     assert np.isfinite(oof).all()
-    R["nested_cv_folds"] = folds_info
+    R["nested_cv_folds"] = info
     df["soh_pred_oof"] = oof
+
     nested = {}
     for s in SRC:
         mk = (df.source == s).to_numpy()
         y, p_ = df[TARGET].to_numpy()[mk], oof[mk]
         nested[s] = {**row_metrics(y, p_), "CI95": cluster_ci(df[mk], p_),
-                     "median_baseline": row_metrics(y, T.SourceMedian().fit(df).predict(df[mk])),
+                     "median_baseline": row_metrics(y, common.SourceMedian().fit(df).predict(df[mk])),
                      "n_rows": int(mk.sum()), "n_groups": int(df[mk].group.nunique())}
         v = nested[s]
         log(f"   {s:7s} MAE {v['MAE']:.4f} [{v['CI95']['MAE'][0]:.4f},{v['CI95']['MAE'][1]:.4f}] | RMSE {v['RMSE']:.4f} "
@@ -368,34 +374,41 @@ def main():
         q = pd.qcut(col, 5, labels=False, duplicates="drop")
         ea[nm] = [{"quintile": int(i), "MAE": float(g.res.abs().mean()), "bias": float(g.res.mean())} for i, g in b.groupby(q)]
     R["BatICM_error_by_quintile"] = ea
+    return qs
 
-    # ---------- 5. 최종 모델 (전체 데이터, 5-시드)
+
+def stage_final(raw, df, design, params, n_dev, dev_len, qs, R):
+    """[5] 전체 데이터로 5-시드 최종 모델 학습 -> 모델/설정/행별 예측 저장. 반환: 최종 5개 모델, 중요도"""
+    name, feats, base, mode, mono = design
     log("\n== [5] final model on all data (5-seed bag)")
-    n_full = int(np.ceil(n_dev * len(df) / len(dev)))
-    final_bag = fit_bag(params, df, feats, T.make_weights(df, mode), n_full)
-    for k, bst_ in enumerate(final_bag):
-        bst_.save_model(str(RES / f"xgb_soh_final_seed{k}.json"))
-    imp = pd.concat([pd.Series(b_.get_score(importance_type="gain")) for b_ in final_bag], axis=1).mean(axis=1).sort_values(ascending=False)
+    n_full = int(np.ceil(n_dev * len(df) / dev_len))
+    bag = fit_bag(params, df, feats, common.make_weights(df, mode), n_full)
+    for k, b_ in enumerate(bag):
+        b_.save_model(str(RES / f"xgb_soh_final_seed{k}.json"))
+    imp = pd.concat([pd.Series(b_.get_score(importance_type="gain")) for b_ in bag], axis=1).mean(axis=1).sort_values(ascending=False)
     R["importance_gain"] = {k: float(v) for k, v in imp.items()}
-    out_raw = raw.copy()
-    out_raw["soh_pred"] = pred_bag(final_bag, out_raw, feats)
-    out_raw = out_raw.merge(df[["row_id", "soh_pred_oof"]], on="row_id", how="left")
-    q = out_raw["source"].map(qs)
+    out = raw.copy()
+    out["soh_pred"] = pred_bag(bag, out, feats)
+    out = out.merge(df[["row_id", "soh_pred_oof"]], on="row_id", how="left")
+    q = out["source"].map(qs)
     pd.DataFrame({
-        "row_id": out_raw.row_id, "dataset": out_raw.source, "entity_id": out_raw.entity_id, "cycle_index": out_raw.cycle_index,
-        "soh_true": out_raw[TARGET], "soh_pred": out_raw.soh_pred, "soh_pred_oof": out_raw.soh_pred_oof,
-        "soh_lo90": out_raw.soh_pred - q, "soh_hi90": out_raw.soh_pred + q,
-        "abs_err": (out_raw[TARGET] - out_raw.soh_pred).abs(), "abs_err_oof": (out_raw[TARGET] - out_raw.soh_pred_oof).abs(),
-        "excluded_outlier": out_raw.row_id.isin(set(raw.row_id) - set(df.row_id)).astype(int)
+        "row_id": out.row_id, "dataset": out.source, "entity_id": out.entity_id, "cycle_index": out.cycle_index,
+        "soh_true": out[TARGET], "soh_pred": out.soh_pred, "soh_pred_oof": out.soh_pred_oof,
+        "soh_lo90": out.soh_pred - q, "soh_hi90": out.soh_pred + q,
+        "abs_err": (out[TARGET] - out.soh_pred).abs(), "abs_err_oof": (out[TARGET] - out.soh_pred_oof).abs(),
+        "excluded_outlier": out.row_id.isin(set(raw.row_id) - set(df.row_id)).astype(int)
     }).to_csv(RES / "soh_predictions_all_rows.csv", index=False, encoding="utf-8-sig")
-    R["in_sample_final_model"] = {s: row_metrics(df[TARGET].to_numpy()[(df.source == s).to_numpy()],
-                                                 pred_bag(final_bag, df[df.source == s], feats)) for s in SRC}
+    R["in_sample_final_model"] = per_source_metrics(df, pred_bag(bag, df, feats))
     meta = {"features": feats, "target": TARGET, "n_models": BAG, "n_rounds": n_full, "params": R["best_params"],
             "design": R["chosen_design"], "interval_half_width_90": qs, "data_sha256": R["env"]["data_sha256"],
             "note": "예측 = 5개 시드 모델 평균. soh_lo90/hi90 = 예측 +- 해당 데이터셋 OOF 절대잔차 90% 분위수. "
                     "BatICM 세션 피처는 build_baticm_features.py 로 생성."}
     (RES / "model_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return imp
 
+
+def save_figures(df, nested, imp):
+    oof = df["soh_pred_oof"].to_numpy()
     fig, ax = plt.subplots(1, 3, figsize=(15, 4.5))
     for a_, s in zip(ax, SRC):
         mk = (df.source == s).to_numpy()
@@ -405,6 +418,7 @@ def main():
         a_.set_title(f"{s} nested-CV (unseen battery)  MAE {nested[s]['MAE']:.4f}  R2 {nested[s]['R2']:.3f}")
         a_.set_xlabel("true SOH"); a_.set_ylabel("pred SOH")
     plt.tight_layout(); plt.savefig(RES / "nested_cv_pred_vs_true.png", dpi=130); plt.close()
+    b = df[df.source == "BatICM"]
     fig, ax = plt.subplots(2, 3, figsize=(15, 7))
     for a_, e in zip(ax.ravel(), list(b.entity_id.unique()[:6])):
         d = b[b.entity_id == e].sort_values("cycle_index")
@@ -417,9 +431,61 @@ def main():
     ax.barh(ks, [imp[k] for k in ks]); ax.set_title("Feature importance (gain, 5-seed mean)")
     plt.tight_layout(); plt.savefig(RES / "feature_importance.png", dpi=120); plt.close()
 
+
+# ------------------------------------------------------------------ main
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--trials", type=int, default=40)
+    ap.add_argument("--inner-trials", type=int, default=20)
+    ap.add_argument("--quick", action="store_true")
+    a = ap.parse_args()
+    if a.quick:
+        a.trials, a.inner_trials = 2, 1
+    sys.stdout.reconfigure(encoding="utf-8")
+    RES.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    R = {"env": {"xgboost": xgb.__version__, "sklearn": sklearn.__version__, "pandas": pd.__version__,
+                 "numpy": np.__version__, "python": sys.version.split()[0], "platform": platform.platform(),
+                 "seed": SEED, "bag": BAG, "nthread": common.NTHREAD,
+                 "data_sha256": hashlib.sha256(common.DATA_XLSX.read_bytes()).hexdigest()[:16]}}
+
+    # ---------- 0. 데이터
+    raw, fe_cols = load_all()
+    df, clean_rep = common.clean(raw)
+    df = df.reset_index(drop=True)
+    dev = df[df.split.isin(["train", "validation"])].reset_index(drop=True)
+    test = df[df.split == "test"].reset_index(drop=True)
+    R["sanity"] = common.sanity_checks(df, dev, test)
+    team16 = list(common.FEATURES)
+    full = team16 + fe_cols
+    for f in full:  # 누수 위험 컬럼 차단
+        assert f not in common.FORBIDDEN_IN_X and f not in LEAKY and not f.startswith("available_"), f
+    R["cleaning"] = clean_rep
+    R["features"] = {"team16": team16, "baticm_session_features": fe_cols}
+    log(f"== data: {len(df)} rows | dev {len(dev)} ({dev.entity_id.nunique()} ent) | test {len(test)} ({test.entity_id.nunique()} ent) "
+        f"| +{len(fe_cols)} BatICM features | threads {common.NTHREAD} x jobs {N_JOBS}")
+
+    # BatICM 정답 잡음 바닥 (정답이 차량 추세 주위에서 흔들리는 정도 -- 이보다 잘 맞추려면 피처에 정보가 있어야 한다)
+    bb = df[df.source == "BatICM"].sort_values(["entity_id", "cycle_index"])
+    trend = bb.groupby("entity_id")[TARGET].transform(lambda s: s.rolling(NOISE_WINDOW, center=True, min_periods=NOISE_WINDOW // 2).median())
+    e_ = (bb[TARGET] - trend).dropna()
+    R["BatICM_label_noise_floor_vs_local_trend"] = {"MAE": float(e_.abs().mean()), "RMSE": float(np.sqrt((e_ ** 2).mean()))}
+    log(f"   BatICM label noise vs local trend: MAE {e_.abs().mean():.4f} RMSE {np.sqrt((e_ ** 2).mean()):.4f}")
+
+    n_rep = 1 if a.quick else 3
+    dfs = [make_folds(dev, 5, SEED + r) for r in range(n_rep)]
+    bmed = baseline_oofs(dev, dfs)
+
+    design = stage_design(dev, dfs, bmed, team16, full, R)          # [1]
+    params, n_dev = stage_tune(dev, dfs, bmed, design, a.trials, R)  # [2]
+    stage_test(dev, test, design, params, n_dev, team16, R)           # [3]
+    qs = stage_nested(df, design, a.inner_trials, R)                  # [4]
+    imp = stage_final(raw, df, design, params, n_dev, len(dev), qs, R)  # [5]
+    save_figures(df, R["nested_cv"], imp)
+
     R["elapsed_min"] = round((time.time() - t0) / 60, 1)
     (RES / "metrics.json").write_text(json.dumps(R, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"\n== done in {R['elapsed_min']} min -> {RES}")
+    log(f"\n== done in {R['elapsed_min']} min -> training/results")
 
 
 if __name__ == "__main__":

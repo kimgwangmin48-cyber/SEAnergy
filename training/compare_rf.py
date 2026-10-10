@@ -7,11 +7,10 @@ import json
 import sys
 
 import numpy as np
-import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
+import soh_common as common
 import train_final as F
-import train_soh_xgb as T
 
 
 def main():
@@ -19,13 +18,13 @@ def main():
     meta = json.loads((F.RES / "model_meta.json").read_text(encoding="utf-8"))
     feats, mode = meta["features"], meta["design"]["weight_mode"]
     raw, _ = F.load_all()
-    df, _ = T.clean(raw)
+    df, _ = common.clean(raw)
     df = df.reset_index(drop=True)
     oof = np.full(len(df), np.nan)
     for k, (tr, te) in enumerate(F.make_folds(df, 5, F.SEED + 77)):
         a = df.iloc[tr]
-        rf = RandomForestRegressor(n_estimators=300, min_samples_leaf=5, max_features=0.7, n_jobs=T.NTHREAD, random_state=F.SEED)
-        rf.fit(a[feats].fillna(-999), a[F.TARGET], sample_weight=T.make_weights(a, mode))
+        rf = RandomForestRegressor(n_estimators=300, min_samples_leaf=5, max_features=0.7, n_jobs=-1, random_state=F.SEED)
+        rf.fit(a[feats].fillna(-999), a[F.TARGET], sample_weight=common.make_weights(a, mode))
         oof[te] = rf.predict(df.iloc[te][feats].fillna(-999))
         print(f"fold {k} done", flush=True)
     out = {}

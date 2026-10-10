@@ -59,20 +59,20 @@
   ],
   "target": "soh_target_frac",
   "n_models": 5,
-  "n_rounds": 149,
+  "n_rounds": 397,
   "params": {
     "objective": "reg:absoluteerror",
     "eval_metric": "mae",
     "tree_method": "hist",
-    "learning_rate": 0.09461038279565662,
-    "max_depth": 8,
-    "min_child_weight": 71.2199651830162,
-    "subsample": 0.8255385127509722,
-    "colsample_bytree": 0.9659838702175123,
-    "reg_lambda": 1.2982066153332954,
-    "reg_alpha": 0.0020651502604094154,
-    "gamma": 0.1,
-    "colsample_bynode": 0.8950270044528594,
+    "learning_rate": 0.10916433528838437,
+    "max_depth": 5,
+    "min_child_weight": 6.170217483403151,
+    "subsample": 0.9633294328968971,
+    "colsample_bytree": 0.8909087983425683,
+    "reg_lambda": 2.588563920257926,
+    "reg_alpha": 0.05239496023834862,
+    "gamma": 0.01,
+    "colsample_bynode": 0.5285785381640847,
     "monotone_constraints": "(-1,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)"
   },
   "design": {
@@ -83,9 +83,9 @@
     "n_features": 56
   },
   "interval_half_width_90": {
-    "NASA": 0.09419211506279573,
-    "BatICM": 0.022108691894767118,
-    "SNL": 0.02341092886311803
+    "NASA": 0.08722623057423581,
+    "BatICM": 0.022222619638053855,
+    "SNL": 0.022741163847986887
   },
   "data_sha256": "42839ee3fd9af69f",
   "note": "예측 = 5개 시드 모델 평균. soh_lo90/hi90 = 예측 +- 해당 데이터셋 OOF 절대잔차 90% 분위수. BatICM 세션 피처는 build_baticm_features.py 로 생성."
