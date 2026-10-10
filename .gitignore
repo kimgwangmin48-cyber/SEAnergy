@@ -1,6 +1,14 @@
-# 데이터셋은 용량이 커서(약 2GB+) git 대신 로컬/Notion에 보관합니다.
+# 데이터셋은 용량이 커서(약 2GB+) git 대신 로컬에 보관합니다.
 # 다운로드·전처리 스크립트는 preprocessing/ 에 있으니, 데이터는 그걸로 재생성하세요.
 datasets/
+
+# 팀 통합 데이터(엑셀): 공개 데이터셋에서 파생된 값이라 저장소에 포함하지 않습니다.
+# 학습하려면 저장소 루트에 '모든 데이터 병합.xlsx'를 두세요 (training/README 참고).
+*.xlsx
+
+# 학습 중간 산출물(캐시·피처 pickle·탐색 실행 기록)과 행별 예측(원본 데이터 파생 값)
+training/outputs*/
+training/results/soh_predictions_all_rows.csv
 
 # Python
 __pycache__/
