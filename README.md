@@ -73,7 +73,7 @@ python preprocessing/prepare_training_data.py   # NASA / BatICM 전처리
 python preprocessing/prepare_snl_data.py        # SNL 전처리 (입력: datasets/SNL_NMC/raw/snl_capacity_per_cycle.csv)
 
 # 학습 입력은 저장소 루트의 '모든 데이터 병합.xlsx'입니다 (저장소에 포함)
-python training/build_baticm_features.py        # BatICM 원본 로그(약 1.1GB, datasets/BatICM/raw_csv)에서 세션 피처 생성
+python training/build_baticm_features.py        # (생략 가능) BatICM 원본 로그(약 1.1GB)에서 세션 피처 생성. 결과가 training/outputs/features_baticm.pkl로 저장소에 들어 있습니다
 python training/train_final.py --trials 25 --inner-trials 10   # 학습·검증 (약 45분)
 python training/compare_rf.py                   # (선택) RandomForest 비교
 python training/make_report.py                  # training/results/report.md 생성

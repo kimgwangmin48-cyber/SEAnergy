@@ -6,7 +6,9 @@ datasets/
 SOH학습용 데이터.xlsx
 
 # 학습 중간 산출물(캐시·피처 pickle·탐색 실행 기록)과 행별 예측(원본 데이터 파생 값)
-training/outputs*/
+training/outputs*/*
+# 단, BatICM 세션 피처는 포함합니다 (원본 로그 1.1GB 없이도 학습을 재현할 수 있게)
+!training/outputs/features_baticm.pkl
 training/results/soh_predictions_all_rows.csv
 
 # Python
